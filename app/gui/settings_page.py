@@ -73,8 +73,10 @@ class SettingsPage(QWidget):
         tg = QWidget()
         tform = QFormLayout(tg)
         hint = QLabel(
-            "Telegram API ID / Hash are loaded from the .env file "
-            "(never stored in config.json). Use CLI: python run.py auth"
+            "Telegram API ID / Hash load from .env "
+            "(dev: project root; packaged: %LOCALAPPDATA%\\TelegramMT5Copier\\.env). "
+            "Never stored in config.json. Auth: python run.py auth "
+            "or TelegramMT5Copier_debug.exe auth"
         )
         hint.setWordWrap(True)
         tform.addRow(hint)

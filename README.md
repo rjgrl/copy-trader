@@ -2,7 +2,7 @@
 
 Lightweight Windows desktop application that listens to selected Telegram groups/channels (via your personal Telegram account), parses trading signals, validates entry conditions intelligently, and executes corresponding orders in MetaTrader 5.
 
-> **Status:** Phase 1–7 complete (Telegram → parse → entry → MT5 execution + PySide6 GUI). Packaging / integration polish follow.
+> **Status:** Phase 1–7 complete + Windows packaging (PyInstaller ONEDIR). Integration polish optional.
 
 ---
 
@@ -250,14 +250,68 @@ All automated tests **mock or avoid** real MT5 order submission.
 
 ---
 
-## Building an executable (Phase 10)
+## Building an executable (Windows)
 
-```bash
-pip install pyinstaller
-pyinstaller --noconfirm --windowed --name TelegramMT5Copier run.py
+Primary build is a **windowed ONEDIR** folder (not onefile):
+
+```powershell
+# From repo root (uses .venv, installs deps, runs PyInstaller)
+.\scripts\build_exe.ps1 -Clean
 ```
 
-(Exact PyInstaller spec will be finalized in Phase 10.)
+Output:
+
+```
+dist\TelegramMT5Copier\TelegramMT5Copier.exe
+```
+
+Optional console/debug build (for troubleshooting and first-time Telegram auth):
+
+```powershell
+.\scripts\build_debug.ps1 -Clean
+```
+
+### Persistent data (packaged EXE)
+
+Writable files are **not** stored next to the EXE or inside PyInstaller's temp folder.
+They live under:
+
+```
+%LOCALAPPDATA%\TelegramMT5Copier\
+  .env                  # Telegram API secrets (create this yourself)
+  data\copier.db
+  data\config.json
+  data\telegram_session.session
+  logs\...
+```
+
+Development mode still uses the repo `data/` and `logs/` directories.
+
+### Telegram credentials (packaged)
+
+1. Create `%LOCALAPPDATA%\TelegramMT5Copier\.env` with `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`
+2. Authenticate once with the **debug** console build:
+
+```powershell
+.\dist\TelegramMT5Copier_debug\TelegramMT5Copier_debug.exe auth
+```
+
+3. Launch the normal windowed EXE — the session file persists across restarts and EXE updates
+
+### MetaTrader 5
+
+The packaged app does **not** include MT5. Install/run your broker terminal separately.
+Configure `mt5_terminal_path` in Settings / `config.json` if auto-detect fails.
+
+### Spec / launcher
+
+| File | Role |
+|------|------|
+| `launcher.py` | PyInstaller entry → `run_gui()` (also supports `auth` etc. on debug build) |
+| `build/TelegramMT5Copier.spec` | Explicit ONEDIR PyInstaller spec |
+| `run.py` | Development CLI (unchanged) |
+
+Do **not** bundle `.env` secrets into the executable.
 
 ---
 
@@ -268,7 +322,9 @@ pyinstaller --noconfirm --windowed --name TelegramMT5Copier run.py
 | Bootstrap fails | Python 3.12+, `pip install -r requirements.txt` |
 | Tests fail | Run from project root; ensure `PYTHONPATH` includes `.` |
 | GUI won't start | `pip install PySide6`; try `python run.py status` first |
-| Telegram not authorized in GUI | Run `python run.py auth` once in a terminal, then Connect in GUI |
+| Packaged EXE data location | `%LOCALAPPDATA%\TelegramMT5Copier\` |
+| Telegram not authorized (EXE) | Create `.env` under LOCALAPPDATA path; run `TelegramMT5Copier_debug.exe auth` |
+| Telegram not authorized in GUI | Run `python run.py auth` once, then Connect in GUI |
 | MT5 connect fails | Terminal running, algorithm trading enabled, correct path |
 | Telegram auth fails | API ID/Hash, phone OTP, 2FA password when prompted |
 

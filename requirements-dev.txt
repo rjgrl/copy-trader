@@ -1,0 +1,8 @@
+# Development / build / test dependencies
+-r requirements.txt
+
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+
+# Windows EXE packaging
+pyinstaller>=6.3.0

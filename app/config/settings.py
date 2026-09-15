@@ -14,14 +14,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.config.defaults import (
     APP_MAGIC_NUMBER,
     DEFAULT_COPY_TRADING_ENABLED,
-    DEFAULT_DATA_DIR,
     DEFAULT_DB_FILENAME,
     DEFAULT_DEVIATION_UNIT,
     DEFAULT_DRY_RUN,
     DEFAULT_ENTRY_DEVIATION_MODE,
     DEFAULT_ENTRY_MODE,
     DEFAULT_FIXED_LOT,
-    DEFAULT_LOG_DIR,
     DEFAULT_LOG_LEVEL,
     DEFAULT_LOT_MODE,
     DEFAULT_MAX_ENTRY_DEVIATION,
@@ -44,10 +42,18 @@ from app.config.defaults import (
     DEFAULT_USE_SL_BASED_DEVIATION,
     default_settings_dict,
 )
+from app.utils.paths import (
+    get_default_data_dir,
+    get_default_log_dir,
+    get_env_file_path,
+    get_project_root,
+    resolve_user_path,
+)
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Backward-compatible alias (development repo root)
+PROJECT_ROOT = get_project_root()
 
 EntryDeviationMode = Literal["fixed", "sl_percent", "stricter", "permissive"]
 TooFarBehavior = Literal["reject", "pending", "manual"]
@@ -97,23 +103,22 @@ class AppSettings(BaseSettings):
 
     Load order:
     1. Built-in defaults
-    2. Environment variables / .env
+    2. Environment variables / .env (dev: repo root; packaged: LOCALAPPDATA)
     3. Optional data/config.json overlays (non-secret UI settings)
     """
 
     model_config = SettingsConfigDict(
-        env_file=str(PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
     )
 
-    # Paths
-    data_dir: Path = Field(default=PROJECT_ROOT / DEFAULT_DATA_DIR)
-    log_dir: Path = Field(default=PROJECT_ROOT / DEFAULT_LOG_DIR)
+    # Paths — defaults use persistent root (repo in dev, LOCALAPPDATA when frozen)
+    data_dir: Path = Field(default_factory=get_default_data_dir)
+    log_dir: Path = Field(default_factory=get_default_log_dir)
     log_level: str = DEFAULT_LOG_LEVEL
 
-    # Telegram (secrets — prefer .env)
+    # Telegram (secrets — prefer .env; never bundled into the EXE)
     telegram_api_id: int | None = None
     telegram_api_hash: str | None = None
     telegram_session_name: str = DEFAULT_TELEGRAM_SESSION_NAME
@@ -137,13 +142,20 @@ class AppSettings(BaseSettings):
         default_factory=lambda: {"XAUUSD": "GOLD#", "GOLD": "GOLD#"}
     )
 
+    def __init__(self, **kwargs: Any) -> None:
+        env_file = kwargs.pop("_env_file", None)
+        if env_file is None:
+            env_path = get_env_file_path()
+            # Only pass an existing file; missing .env is fine (env vars still work)
+            env_file = env_path if env_path.is_file() else None
+        super().__init__(_env_file=env_file, **kwargs)
+
     @field_validator("data_dir", "log_dir", mode="before")
     @classmethod
     def _resolve_path(cls, value: Any) -> Path:
-        path = Path(value)
-        if not path.is_absolute():
-            path = PROJECT_ROOT / path
-        return path
+        if value is None:
+            return get_default_data_dir()
+        return resolve_user_path(value)
 
     @property
     def database_path(self) -> Path:

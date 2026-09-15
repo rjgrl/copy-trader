@@ -151,7 +151,10 @@ class AppController(QObject):
             if interactive:
                 raise RuntimeError(
                     "Telegram session not authorized. "
-                    "Run 'python run.py auth' once in a terminal, then reconnect here."
+                    "Development: run 'python run.py auth'. "
+                    "Packaged: put API credentials in "
+                    "%LOCALAPPDATA%\\TelegramMT5Copier\\.env then run "
+                    "'TelegramMT5Copier_debug.exe auth'."
                 )
             return False
 

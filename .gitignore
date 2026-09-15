@@ -7,9 +7,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
-dist/
-build/
-*.spec
 
 # Virtual environments
 .venv/
@@ -36,6 +33,12 @@ logs/*.log.*
 .DS_Store
 Thumbs.db
 
-# Packaging
+# Packaging outputs (keep build/*.spec tracked)
+dist/
+build/pyinstaller/
+build/pyinstaller_debug/
+build/TelegramMT5Copier/
+build/TelegramMT5Copier_debug/
 TelegramMT5Copier.exe
 *.exe
+!scripts/
