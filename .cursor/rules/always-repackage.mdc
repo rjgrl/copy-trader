@@ -1,0 +1,21 @@
+---
+description: Rebuild both Windows EXEs after every code change
+alwaysApply: true
+---
+
+# Always repackage after edits
+
+After any code change, rebuild both Windows packages before finishing. Do not skip this because tests passed. Do not ask whether to package.
+
+1. Stop leftover `TelegramMT5Copier` / `TelegramMT5Copier_debug` processes if they lock `dist\`.
+2. From repo root:
+
+```powershell
+.\scripts\build_exe.ps1 -Clean
+.\scripts\build_debug.ps1 -Clean
+```
+
+Outputs:
+
+- `dist\TelegramMT5Copier\TelegramMT5Copier.exe` (windowed)
+- `dist\TelegramMT5Copier_debug\TelegramMT5Copier_debug.exe` (console)

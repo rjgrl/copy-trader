@@ -38,6 +38,9 @@ class SignalDeduplicator:
             signal.direction.value if signal.direction else "",
             signal.symbol or "",
             f"{signal.entry:.5f}" if signal.entry is not None else "",
+            f"{signal.entry_low:.5f}" if signal.entry_low is not None else "",
+            f"{signal.entry_high:.5f}" if signal.entry_high is not None else "",
+            signal.order_type.value if signal.order_type else "",
             ",".join(f"{tp:.5f}" for tp in signal.take_profits),
             f"{signal.stop_loss:.5f}" if signal.stop_loss is not None else "",
         ]

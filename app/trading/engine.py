@@ -61,7 +61,7 @@ class IntelligentEntryEngine:
 
     def evaluate(self, signal: ParsedSignal) -> EntryCheckResult:
         """Run symbol + market + entry + safety checks. Never sends orders."""
-        if signal.direction is None or signal.symbol is None or signal.entry is None:
+        if signal.direction is None or signal.symbol is None or not signal.has_entry():
             decision = EntryDecision(
                 ok=False,
                 action=EntryAction.REJECT.value,
@@ -153,11 +153,13 @@ class IntelligentEntryEngine:
         )
 
         # 3) Intelligent entry validation (pure logic)
+        # New Telegram messages always market-execute at the live price.
         decision = self.validator.evaluate(
             signal,
             exec_price,
             spread=spread,
             point=point,
+            is_new_message=True,
         )
 
         # 4) Safety: max orders per signal
@@ -218,7 +220,7 @@ class IntelligentEntryEngine:
 
         logger.info(
             "Entry check PASSED: MARKET %s %s @ %s (signal entry %s, deviation %s) "
-            "TPs=%s SL=%s dry_run=%s",
+            "TPs=%s SL=%s dry_run=%s notes=%s",
             direction,
             mapped,
             exec_price,
@@ -227,6 +229,7 @@ class IntelligentEntryEngine:
             signal.take_profits,
             signal.stop_loss,
             self.settings.dry_run,
+            decision.reason,
         )
 
         return EntryCheckResult(

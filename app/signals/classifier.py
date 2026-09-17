@@ -1,6 +1,7 @@
 """Message classification — reject chatter, updates, and analysis before trading.
 
 Conservative: when uncertain, treat as non-executable.
+Structured signals with TP+SL are prioritized over trailing analysis text.
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ import re
 from enum import Enum
 
 from pydantic import BaseModel, Field
+
+from app.signals.normalizer import prepare_message_for_parse
 
 
 class MessageKind(str, Enum):
@@ -23,7 +26,6 @@ class MessageKind(str, Enum):
     UNKNOWN = "unknown"
 
 
-# Explicit non-executable update patterns (TP hits, SL moves, closes, etc.)
 UPDATE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bTP\s*\d*\s*(HIT|REACHED|DONE|BOOKED|SECURED)\b", re.I),
     re.compile(r"\b(TAKE\s*PROFIT|TARGET)\s*(HIT|REACHED)\b", re.I),
@@ -36,7 +38,6 @@ UPDATE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bSECURE\s+PROFITS?\b", re.I),
 ]
 
-# Conversational / conditional / analysis language near BUY/SELL
 ANALYSIS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(
         r"\b(LOOKS?\s+STRONG|LOOKING\s+(BULLISH|BEARISH)|IS\s+(BULLISH|BEARISH))\b",
@@ -45,7 +46,7 @@ ANALYSIS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(WAITING\s+FOR|WAIT\s+FOR|WAIT)\b.{0,40}\b(BUY|SELL)\b", re.I),
     re.compile(r"\b(POSSIBLE|POTENTIAL|MAYBE|MIGHT|COULD)\s+(BUY|SELL)\b", re.I),
     re.compile(r"\b(BUY|SELL)\s+IF\b", re.I),
-    re.compile(r"\bIF\s+PRICE\s+(BREAKS?|BREAKS?\s+ABOVE|BREAKS?\s+BELOW)\b", re.I),
+    re.compile(r"\bIF\s+PRICE\s+(BREAKS?|BREAKS?\s+ABOVE|BREAKS?\s+BELOW|REACHES?)\b", re.I),
     re.compile(r"\b(AROUND|NEAR|NEARBY)\s+\d", re.I),
     re.compile(r"\b(ANALYSIS|MARKET\s+UPDATE|NEWS|OUTLOOK|FORECAST)\b", re.I),
     re.compile(r"\b(HOLD|HOLDING)\b", re.I),
@@ -58,14 +59,15 @@ CANCEL_PATTERN = re.compile(
     re.I,
 )
 
-# Structured signal hints: direction + symbol-ish + numeric prices
 STRUCTURED_HINT = re.compile(
-    r"\b(BUY|SELL|LONG|SHORT)\b.+\b[A-Z]{3,}|\b[A-Z]{3,}.+\b(BUY|SELL|LONG|SHORT)\b",
+    r"\b(BUY|SELL|LONG|SHORT)\b.+\b[A-Z]{3,}|\b[A-Z]{3,}.+\b(BUY|SELL|LONG|SHORT)\b"
+    r"|\bGOLD\b.+\b(BUY|SELL|LONG|SHORT)\b|\b(BUY|SELL|LONG|SHORT)\b.+\bGOLD\b",
     re.I | re.S,
 )
-HAS_TP = re.compile(r"\b(TP|TAKE\s*PROFIT|TARGET)\b", re.I)
-HAS_SL = re.compile(r"\b(SL|STOP\s*LOSS|STOP)\b", re.I)
+HAS_TP = re.compile(r"\b(TP|TAKE\s*PROFIT|TAKEPROFIT|TARGET)\b", re.I)
+HAS_SL = re.compile(r"\b(SL|STOP\s*LOSS|STOPLOSS|STOP)\b", re.I)
 HAS_ENTRY_NUMBER = re.compile(r"\d+\.\d+|\b\d{3,}\b")
+HAS_RANGE = re.compile(r"\d[\d.,]*\s*-\s*\d[\d.,]*")
 
 
 class ClassificationResult(BaseModel):
@@ -89,14 +91,17 @@ class MessageClassifier:
                 reasons=["Empty message"],
             )
 
-        if CANCEL_PATTERN.search(raw):
+        normalized, _ = prepare_message_for_parse(raw)
+        probe = normalized or raw
+
+        if CANCEL_PATTERN.search(probe):
             return ClassificationResult(
                 kind=MessageKind.CANCELLATION,
                 reasons=["CANCELLATION_SIGNAL_DETECTED"],
             )
 
         for pattern in UPDATE_PATTERNS:
-            if pattern.search(raw):
+            if pattern.search(probe):
                 return ClassificationResult(
                     kind=MessageKind.TRADE_UPDATE,
                     reasons=[
@@ -105,8 +110,25 @@ class MessageClassifier:
                     ],
                 )
 
+        has_dir = bool(re.search(r"\b(BUY|SELL|LONG|SHORT)\b", probe, re.I))
+        has_tp = bool(HAS_TP.search(probe))
+        has_sl = bool(HAS_SL.search(probe))
+        has_numbers = bool(HAS_ENTRY_NUMBER.search(probe))
+        structured = bool(STRUCTURED_HINT.search(probe)) or bool(HAS_RANGE.search(probe))
+
+        # Strong structured body wins over trailing analysis / disclaimers
+        strong_structured = has_dir and has_numbers and has_tp and has_sl and (
+            structured or bool(re.search(r"\bGOLD\b", probe, re.I))
+        )
+        if strong_structured:
+            return ClassificationResult(
+                kind=MessageKind.EXECUTABLE_CANDIDATE,
+                reasons=["Structured trade signal body (TP+SL) — analysis text ignored"],
+                executable_candidate=True,
+            )
+
         for pattern in ANALYSIS_PATTERNS:
-            if pattern.search(raw):
+            if pattern.search(probe):
                 return ClassificationResult(
                     kind=MessageKind.ANALYSIS,
                     reasons=[
@@ -115,15 +137,7 @@ class MessageClassifier:
                     ],
                 )
 
-        # Direction word alone / without structured trade body → chatter
-        has_dir = bool(re.search(r"\b(BUY|SELL|LONG|SHORT)\b", raw, re.I))
-        has_tp = bool(HAS_TP.search(raw))
-        has_sl = bool(HAS_SL.search(raw))
-        has_numbers = bool(HAS_ENTRY_NUMBER.search(raw))
-        structured = bool(STRUCTURED_HINT.search(raw))
-
         if has_dir and not (has_tp or has_sl):
-            # "BUY looks strong", "BUY XAUUSD" without TP/SL — not executable yet
             if not has_numbers or not structured:
                 return ClassificationResult(
                     kind=MessageKind.CHATTER,
@@ -138,7 +152,6 @@ class MessageClassifier:
             )
 
         if has_dir and structured and has_numbers:
-            # May still be incomplete (missing TP/SL) — let parser+validator decide
             return ClassificationResult(
                 kind=MessageKind.EXECUTABLE_CANDIDATE,
                 reasons=["Direction+symbol+price present; validator will enforce TP/SL"],

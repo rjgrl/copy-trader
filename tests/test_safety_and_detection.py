@@ -111,7 +111,7 @@ class TestMathValidation:
             stop_loss=4300.0,
         )
         reasons = check_price_relationships(signal)
-        assert any("SL < Entry" in r for r in reasons)
+        assert any("SL below the entry zone" in r or "SL < Entry" in r for r in reasons)
 
     def test_sell_all_tps_must_be_below_entry(self) -> None:
         signal = ParsedSignal(
@@ -225,7 +225,7 @@ class TestSignalInspector:
         assert result.symbol == "XAUUSD"
         assert result.tp_count == 3
         assert result.validation_ok is True
-        assert "SIGNAL DETECTED" in result.summary
+        assert "VALID SIGNAL" in result.summary
 
     def test_chatter_report(self) -> None:
         result = SignalInspector().inspect("Gold is looking bearish today.")

@@ -118,7 +118,8 @@ class TelegramSourceManager:
                     dialog_type=dtype,
                     username=getattr(entity, "username", None),
                     unread_count=int(dialog.unread_count or 0),
-                    is_monitored=telegram_id in monitored and monitored[telegram_id].enabled,
+                    is_monitored=telegram_id in monitored and bool(monitored[telegram_id].enabled),
+                    last_message_id=monitored[telegram_id].last_message_id if telegram_id in monitored else None,
                 )
             )
 

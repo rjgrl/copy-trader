@@ -267,6 +267,20 @@ class OrderRepository:
         )
         return [self._row_to_order(r) for r in rows]
 
+    def delete_by_ids(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        cur = self._db.execute(
+            f"DELETE FROM orders WHERE id IN ({placeholders}) AND dry_run=1",
+            tuple(ids),
+        )
+        return int(cur.rowcount or 0)
+
+    def delete_dry_run(self) -> int:
+        cur = self._db.execute("DELETE FROM orders WHERE dry_run=1")
+        return int(cur.rowcount or 0)
+
     @staticmethod
     def _row_to_order(row) -> OrderRecord:
         return OrderRecord(
@@ -304,8 +318,11 @@ class TelegramSourceRepository:
             self._db.execute(
                 """
                 UPDATE telegram_sources SET
-                    name=?, source_type=?, enabled=?, connection_status=?,
-                    last_message_id=?, last_message_at=?, last_signal_at=?,
+                    name=?, source_type=?, enabled=?,
+                    connection_status=COALESCE(?, connection_status),
+                    last_message_id=COALESCE(?, last_message_id),
+                    last_message_at=COALESCE(?, last_message_at),
+                    last_signal_at=COALESCE(?, last_signal_at),
                     updated_at=?
                 WHERE telegram_id=?
                 """,
@@ -313,7 +330,7 @@ class TelegramSourceRepository:
                     source.name,
                     source.source_type,
                     1 if source.enabled else 0,
-                    source.connection_status,
+                    source.connection_status or None,
                     source.last_message_id,
                     _dt_to_str(source.last_message_at),
                     _dt_to_str(source.last_signal_at),
@@ -352,10 +369,36 @@ class TelegramSourceRepository:
         )
         return [self._row_to_source(r) for r in rows]
 
-    def set_enabled(self, telegram_id: int, enabled: bool) -> None:
+    def set_enabled(
+        self,
+        telegram_id: int,
+        enabled: bool,
+        *,
+        name: str | None = None,
+        source_type: str | None = None,
+    ) -> None:
+        existing = self._db.fetchone(
+            "SELECT id FROM telegram_sources WHERE telegram_id=?",
+            (telegram_id,),
+        )
+        now = utc_now().isoformat()
+        if existing:
+            self._db.execute(
+                "UPDATE telegram_sources SET enabled=?, updated_at=? WHERE telegram_id=?",
+                (1 if enabled else 0, now, telegram_id),
+            )
+            return
         self._db.execute(
-            "UPDATE telegram_sources SET enabled=?, updated_at=? WHERE telegram_id=?",
-            (1 if enabled else 0, utc_now().isoformat(), telegram_id),
+            """
+            INSERT INTO telegram_sources (telegram_id, name, source_type, enabled)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                telegram_id,
+                name or f"chat:{telegram_id}",
+                source_type or "unknown",
+                1 if enabled else 0,
+            ),
         )
 
     def delete(self, telegram_id: int) -> None:

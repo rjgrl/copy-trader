@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -31,7 +32,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller = controller
         self.setWindowTitle("Telegram MT5 Copier")
-        self.resize(1180, 760)
+        self.resize(1280, 860)
         self.setStyleSheet(APP_STYLESHEET)
 
         shell = QWidget()
@@ -106,18 +107,27 @@ class MainWindow(QMainWindow):
 
         d.btn_connect_mt5.clicked.connect(c.connect_mt5)
         d.btn_connect_tg.clicked.connect(lambda: c.connect_telegram(interactive=True))
-        d.btn_listen.clicked.connect(c.start_listening)
+        d.btn_listen.clicked.connect(self._start_listening)
         d.btn_stop_listen.clicked.connect(c.stop_listening)
         d.btn_simulate.clicked.connect(c.simulate_sample)
         d.btn_kill.clicked.connect(self._toggle_kill)
+        d.btn_delete_selected.clicked.connect(
+            lambda: self._delete_selected_dry_run(self.page_dashboard.selected_order_ids())
+        )
+        d.btn_delete_all_dry.clicked.connect(self._delete_all_dry_run)
 
         t.btn_connect.clicked.connect(lambda: c.connect_telegram(interactive=True))
         t.btn_load.clicked.connect(c.load_dialogs)
-        t.btn_refresh.clicked.connect(lambda: self.page_telegram.set_sources(c.sources.list_all()))
+        t.btn_refresh.clicked.connect(c.load_dialogs)
+        t.btn_listen.clicked.connect(self._start_listening)
         t.source_toggled.connect(self._on_source_toggled)
 
         self.page_signals.btn_refresh.clicked.connect(c.refresh_status)
         self.page_orders.btn_refresh.clicked.connect(c.refresh_status)
+        self.page_orders.delete_selected_requested.connect(
+            lambda: self._delete_selected_dry_run(self.page_orders.selected_order_ids())
+        )
+        self.page_orders.delete_all_dry_run_requested.connect(self._delete_all_dry_run)
 
         s.btn_save.clicked.connect(self._save_settings)
         s.btn_inspect.clicked.connect(self._inspect)
@@ -134,6 +144,70 @@ class MainWindow(QMainWindow):
             self.controller.upsert_source(telegram_id, name, dtype or "unknown", enabled)
         else:
             self.controller.set_source_enabled(telegram_id, enabled)
+        n = len(self.controller.sources.list_enabled())
+        self.status.showMessage(f"Saved group selection ({n} enabled)", 3000)
+
+    def _start_listening(self) -> None:
+        selections = self.page_telegram.collect_selections()
+        enabled_ui = [s for s in selections if s.get("enabled")]
+        if self.page_telegram.has_rows():
+            if not enabled_ui:
+                QMessageBox.warning(
+                    self,
+                    "No groups enabled",
+                    "Check at least one Telegram group/channel on the Telegram page, "
+                    "then click Start Listening.",
+                )
+                return
+            self.controller.start_listening(selections)
+            self.status.showMessage(
+                f"Starting listener for {len(enabled_ui)} saved group(s)…",
+                4000,
+            )
+            return
+        enabled_db = self.controller.sources.list_enabled()
+        if not enabled_db:
+            QMessageBox.warning(
+                self,
+                "No groups enabled",
+                "Check at least one Telegram group/channel on the Telegram page, "
+                "then click Start Listening.",
+            )
+            return
+        self.controller.start_listening(None)
+        self.status.showMessage(
+            f"Starting listener for {len(enabled_db)} saved group(s)…",
+            4000,
+        )
+
+    def _delete_selected_dry_run(self, order_ids: list[int]) -> None:
+        if not order_ids:
+            QMessageBox.information(
+                self,
+                "Dry Run orders",
+                "Select one or more Dry Run orders first.",
+            )
+            return
+        deleted = self.controller.delete_selected_dry_run_orders(order_ids)
+        if deleted == 0:
+            QMessageBox.information(
+                self,
+                "Dry Run orders",
+                "No Dry Run orders were deleted. Live orders are never removed this way.",
+            )
+            return
+        self.status.showMessage(f"Deleted {deleted} Dry Run order(s)", 4000)
+
+    def _delete_all_dry_run(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Delete all Dry Run orders",
+            "Remove every Dry Run (fake) order from the dashboard? Live orders are kept.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        deleted = self.controller.delete_all_dry_run_orders()
+        self.status.showMessage(f"Deleted {deleted} Dry Run order(s)", 4000)
 
     def _toggle_kill(self) -> None:
         if self.page_dashboard.btn_kill.isChecked():
@@ -167,13 +241,19 @@ class MainWindow(QMainWindow):
         snap = self.controller.snapshot()
         self.page_signals.set_signals(snap.get("recent_signals") or [])
         self.page_orders.set_orders(snap.get("recent_orders") or [])
-        # Don't overwrite dialogs table if currently showing dialogs
-        if not self.page_telegram._dialogs:
-            self.page_telegram.set_sources(snap.get("sources") or [])
+        # Never rebuild a table the user is selecting in — that used to uncheck groups
+        if not self.page_telegram.has_rows():
+            saved = snap.get("sources") or []
+            if saved:
+                self.page_telegram.set_sources(saved)
 
     def _on_dialogs(self, dialogs: list) -> None:
         self.page_telegram.set_dialogs(dialogs)
-        self.status.showMessage(f"Loaded {len(dialogs)} Telegram dialogs", 4000)
+        enabled = self.page_telegram.enabled_count()
+        self.status.showMessage(
+            f"Loaded {len(dialogs)} Telegram dialogs ({enabled} enabled)",
+            4000,
+        )
 
     def _on_auth(self, ok: bool, msg: str) -> None:
         if ok:
@@ -187,6 +267,9 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Error", message)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # aboutToQuit also calls shutdown; guard with poll stop is fine
         self.controller.shutdown()
+        qt_app = QApplication.instance()
+        if qt_app is not None:
+            qt_app.quit()
+        event.accept()
         super().closeEvent(event)

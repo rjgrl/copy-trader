@@ -90,6 +90,93 @@ class TestDryRunExecution:
         assert saved[0].comment == "TG-XAUUSD-6001-TP1"
         assert saved[0].stop_loss == 4306.5
 
+    def test_delete_dry_run_orders_keeps_live(self, wired) -> None:
+        settings, mock_gw, mt5, pipeline, orders, db = wired
+        result = pipeline.process(
+            IncomingTelegramMessage(
+                chat_id=-10,
+                message_id=6001,
+                text=SAMPLE_SELL_XAUUSD,
+                date=utc_now(),
+                source_name="Sim",
+            )
+        )
+        dry_ids = [o.id for o in orders.list_recent(20) if o.id is not None]
+        assert len(dry_ids) == 3
+        from app.database.models import OrderRecord
+
+        live_id = orders.insert(
+            OrderRecord(
+                id=None,
+                signal_id=int(result.db_id),
+                mt5_ticket=999,
+                symbol="GOLD#",
+                direction="SELL",
+                volume=0.01,
+                entry_price=4293.2,
+                stop_loss=4306.5,
+                take_profit=4287.5,
+                tp_index=9,
+                status="FILLED",
+                retcode=10009,
+                retcode_description="DONE",
+                comment="LIVE",
+                created_at=utc_now(),
+                updated_at=utc_now(),
+                dry_run=False,
+            )
+        )
+        removed = orders.delete_by_ids(dry_ids[:1])
+        assert removed == 1
+        remaining_dry = [o for o in orders.list_recent(20) if o.dry_run]
+        assert len(remaining_dry) == 2
+        cleared = orders.delete_dry_run()
+        assert cleared == 2
+        leftover = orders.list_recent(20)
+        assert len(leftover) == 1
+        assert leftover[0].id == live_id
+        assert leftover[0].dry_run is False
+
+    def test_far_from_entry_still_places_sell(self, wired) -> None:
+        settings, mock_gw, mt5, pipeline, orders, db = wired
+        mock_gw.set_tick("GOLD#", bid=4298.0, ask=4298.3)
+        result = pipeline.process(
+            IncomingTelegramMessage(
+                chat_id=-10,
+                message_id=6010,
+                text=SAMPLE_SELL_XAUUSD,
+                date=utc_now(),
+                source_name="Sim",
+            )
+        )
+        assert result.status == SignalStatus.EXECUTED
+        assert result.execution is not None
+        assert result.execution.success_count == 3
+        saved = orders.list_for_signal(result.db_id)
+        assert len(saved) == 3
+        assert all(o.direction == "SELL" for o in saved)
+
+    def test_past_all_tps_still_places_one_market_order(self, wired) -> None:
+        settings, mock_gw, mt5, pipeline, orders, db = wired
+        mock_gw.set_tick("GOLD#", bid=4270.0, ask=4270.3)
+        result = pipeline.process(
+            IncomingTelegramMessage(
+                chat_id=-10,
+                message_id=6011,
+                text=SAMPLE_SELL_XAUUSD,
+                date=utc_now(),
+                source_name="Sim",
+            )
+        )
+        assert result.status == SignalStatus.EXECUTED
+        assert result.execution is not None
+        assert result.execution.success_count == 1
+        saved = orders.list_for_signal(result.db_id)
+        assert len(saved) == 1
+        assert saved[0].direction == "SELL"
+        assert saved[0].take_profit is None
+        assert saved[0].stop_loss == 4306.5
+
 
 class TestLiveExecutionMock:
     def test_live_calls_order_send(self, settings: AppSettings, mock_gw: MockMT5Gateway) -> None:

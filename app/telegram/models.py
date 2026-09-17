@@ -44,6 +44,7 @@ class TelegramDialog(BaseModel):
     username: str | None = None
     unread_count: int = 0
     is_monitored: bool = False
+    last_message_id: int | None = None
 
 
 class IncomingTelegramMessage(BaseModel):

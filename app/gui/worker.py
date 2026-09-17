@@ -28,12 +28,32 @@ class AsyncWorker(QObject):
     def start(self) -> None:
         self._thread.start()
 
+    def run_and_wait(self, coro: Coroutine[Any, Any, Any], timeout: float = 6.0) -> Any:
+        """Run a coroutine on the worker and wait (for shutdown)."""
+        if self._loop is None or not self._loop.is_running():
+            return None
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Async worker wait failed: %s", exc)
+            return None
+
     def stop(self) -> None:
         if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            loop = self._loop
+
+            def _halt() -> None:
+                for task in asyncio.all_tasks(loop):
+                    task.cancel()
+                loop.stop()
+
+            loop.call_soon_threadsafe(_halt)
         self._thread.quit()
-        if not self._thread.wait(5000):
-            logger.warning("Async worker thread did not stop cleanly")
+        if not self._thread.wait(4000):
+            logger.warning("Async worker thread did not stop — terminating")
+            self._thread.terminate()
+            self._thread.wait(2000)
 
     @Slot()
     def _run_loop(self) -> None:
@@ -46,7 +66,12 @@ class AsyncWorker(QObject):
             pending = asyncio.all_tasks(self._loop)
             for task in pending:
                 task.cancel()
-            self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            try:
+                self._loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            except Exception:  # noqa: BLE001
+                pass
             self._loop.close()
 
     def submit(self, coro: Coroutine[Any, Any, Any], on_done: Callable[[Any], None] | None = None) -> None:

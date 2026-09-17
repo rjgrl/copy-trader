@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = get_project_root()
 
 EntryDeviationMode = Literal["fixed", "sl_percent", "stricter", "permissive"]
-TooFarBehavior = Literal["reject", "pending", "manual"]
+TooFarBehavior = Literal["reject", "pending", "manual", "market"]
 LotMode = Literal["fixed", "total_split"]
 DeviationUnit = Literal["price", "points"]
 

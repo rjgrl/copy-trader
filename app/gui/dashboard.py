@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -14,6 +15,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from app.gui.orders_page import fill_orders_table
 
 
 class DashboardPage(QWidget):
@@ -102,6 +105,39 @@ class DashboardPage(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         root.addWidget(self.table, 1)
 
+        orders_title = QLabel("Recent Orders (including Dry Run)")
+        orders_title.setStyleSheet("font-weight:600;")
+        root.addWidget(orders_title)
+        orders_bar = QHBoxLayout()
+        self.btn_delete_selected = QPushButton("Delete selected dry-run")
+        self.btn_delete_all_dry = QPushButton("Delete all dry-run")
+        self.btn_delete_all_dry.setObjectName("Danger")
+        orders_bar.addWidget(self.btn_delete_selected)
+        orders_bar.addWidget(self.btn_delete_all_dry)
+        orders_bar.addStretch(1)
+        root.addLayout(orders_bar)
+        self.orders_table = QTableWidget(0, 11)
+        self.orders_table.setHorizontalHeaderLabels(
+            [
+                "Signal",
+                "Ticket",
+                "Symbol",
+                "Dir",
+                "Vol",
+                "Entry",
+                "TP",
+                "SL",
+                "Mode",
+                "Status",
+                "Time",
+            ]
+        )
+        self.orders_table.horizontalHeader().setStretchLastSection(True)
+        self.orders_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.orders_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.orders_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        root.addWidget(self.orders_table, 1)
+
     def _stat_card(self, title: str, value: str) -> QFrame:
         frame = QFrame()
         frame.setObjectName("Card")
@@ -166,3 +202,21 @@ class DashboardPage(QWidget):
                 if c == 5:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(i, c, item)
+
+        fill_orders_table(self.orders_table, snap.get("recent_orders") or [])
+
+    def selected_order_ids(self) -> list[int]:
+        ids: list[int] = []
+        seen: set[int] = set()
+        for index in self.orders_table.selectionModel().selectedRows():
+            item = self.orders_table.item(index.row(), 0)
+            if item is None:
+                continue
+            oid = item.data(Qt.ItemDataRole.UserRole)
+            if oid is None:
+                continue
+            order_id = int(oid)
+            if order_id not in seen:
+                seen.add(order_id)
+                ids.append(order_id)
+        return ids

@@ -50,7 +50,7 @@ class SignalValidator:
             reasons.append("Missing Direction")
         if self.rules.require_symbol and not signal.symbol:
             reasons.append("Missing Symbol")
-        if self.rules.require_entry and signal.entry is None:
+        if self.rules.require_entry and not signal.has_entry():
             reasons.append("Missing Entry Price")
         if self.rules.require_tp:
             if signal.tp_count < self.rules.min_tp_count:

@@ -1,8 +1,7 @@
 """Extensible trading signal parser.
 
-Supports multiple common Telegram signal formats and normalizes them into
-a single ParsedSignal model. Additional format handlers can be registered
-without rewriting the pipeline.
+Supports real-world Telegram formats: ranges, limit orders, aliases,
+markdown/emoji noise, and long analysis/disclaimer tails.
 """
 
 from __future__ import annotations
@@ -12,17 +11,21 @@ import re
 from collections.abc import Callable
 from typing import Protocol
 
-from app.signals.models import ParsedSignal, SignalDirection
+from app.signals.models import (
+    EntryType,
+    OrderType,
+    ParsedSignal,
+    SignalDirection,
+)
 from app.signals.normalizer import (
     extract_floats,
     normalize_symbol,
-    normalize_whitespace,
     parse_float,
+    prepare_message_for_parse,
 )
 
 logger = logging.getLogger(__name__)
 
-# Cancellation patterns (V1: detect & log only)
 CANCEL_PATTERN = re.compile(
     r"\b(CANCEL(?:\s+SIGNAL)?|CLOSE\s+ALL|DELETE\s+SIGNAL)\b",
     re.IGNORECASE,
@@ -30,53 +33,105 @@ CANCEL_PATTERN = re.compile(
 
 DIRECTION_PATTERN = re.compile(r"\b(BUY|SELL|LONG|SHORT)\b", re.IGNORECASE)
 
-# Symbol tokens (letters/digits, optional separators) — refined during parse
-SYMBOL_TOKEN = r"[A-Za-z][A-Za-z0-9._/#-]{1,20}"
+SYMBOL_TOKEN = r"(?:XAUUSD|XAGUSD|EURUSD|GBPUSD|BTCUSD|NAS100|US30|GOLD|SILVER|XAU|XAG|[A-Za-z]{3,12})"
 
-# Header patterns: direction + symbol + optional entry
-HEADER_PATTERNS: list[re.Pattern[str]] = [
-    # SELL XAUUSD 4291.5  |  SELL XAUUSD @ 4291.5
-    re.compile(
-        rf"\b(?P<direction>BUY|SELL|LONG|SHORT)\s+"
-        rf"(?P<symbol>{SYMBOL_TOKEN})\s*"
-        rf"(?:@\s*)?(?P<entry>[-+]?\d[\d.,]*)?",
-        re.IGNORECASE,
-    ),
-    # XAUUSD SELL 4291.5
+PRICE = r"[-+]?\d[\d.,]*"
+
+# Explicit limit/stop + optional range or single
+LIMIT_RANGE_PATTERNS: list[re.Pattern[str]] = [
+    # Gold BUY LIMIT 4280 - 4277  |  XAUUSD SELL LIMIT 4295-4292
     re.compile(
         rf"\b(?P<symbol>{SYMBOL_TOKEN})\s+"
-        rf"(?P<direction>BUY|SELL|LONG|SHORT)\s*"
-        rf"(?:@\s*)?(?P<entry>[-+]?\d[\d.,]*)?",
+        rf"(?P<direction>BUY|SELL|LONG|SHORT)\s+"
+        rf"(?P<kind>LIMIT|STOP)\s+"
+        rf"(?P<a>{PRICE})\s*-\s*(?P<b>{PRICE})",
+        re.IGNORECASE,
+    ),
+    # BUY LIMIT GOLD 4280 - 4277
+    re.compile(
+        rf"\b(?P<direction>BUY|SELL|LONG|SHORT)\s+"
+        rf"(?P<kind>LIMIT|STOP)\s+"
+        rf"(?P<symbol>{SYMBOL_TOKEN})\s+"
+        rf"(?P<a>{PRICE})\s*-\s*(?P<b>{PRICE})",
+        re.IGNORECASE,
+    ),
+    # BUY LIMIT 4280 - 4277 GOLD (rare)
+    re.compile(
+        rf"\b(?P<direction>BUY|SELL|LONG|SHORT)\s+"
+        rf"(?P<kind>LIMIT|STOP)\s+"
+        rf"(?P<a>{PRICE})\s*-\s*(?P<b>{PRICE})",
+        re.IGNORECASE,
+    ),
+]
+
+# Implicit range (no LIMIT keyword): XAUUSD SELL 4292 - 4295
+IMPLICIT_RANGE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        rf"\b(?P<symbol>{SYMBOL_TOKEN})\s+"
+        rf"(?P<direction>BUY|SELL|LONG|SHORT)\s+"
+        rf"(?P<a>{PRICE})\s*-\s*(?P<b>{PRICE})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?P<direction>BUY|SELL|LONG|SHORT)\s+"
+        rf"(?P<symbol>{SYMBOL_TOKEN})\s+"
+        rf"(?P<a>{PRICE})\s*-\s*(?P<b>{PRICE})",
+        re.IGNORECASE,
+    ),
+]
+
+# Single-entry headers
+HEADER_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        rf"\b(?P<direction>BUY|SELL|LONG|SHORT)\s+"
+        rf"(?P<symbol>{SYMBOL_TOKEN})\s+"
+        rf"(?:(?P<kind>LIMIT|STOP)\s+)?"
+        rf"(?:@\s*)?(?P<entry>{PRICE})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?P<symbol>{SYMBOL_TOKEN})\s+"
+        rf"(?P<direction>BUY|SELL|LONG|SHORT)\s+"
+        rf"(?:(?P<kind>LIMIT|STOP)\s+)?"
+        rf"(?:@\s*)?(?P<entry>{PRICE})",
+        re.IGNORECASE,
+    ),
+    # Direction + symbol without price (ENTRY line may follow)
+    re.compile(
+        rf"\b(?P<direction>BUY|SELL|LONG|SHORT)\s+(?P<symbol>{SYMBOL_TOKEN})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?P<symbol>{SYMBOL_TOKEN})\s+(?P<direction>BUY|SELL|LONG|SHORT)\b",
         re.IGNORECASE,
     ),
 ]
 
 ENTRY_LINE = re.compile(
-    r"\b(?:ENTRY|ENTER|PRICE|OPEN)\s*[:=]?\s*(?:@\s*)?(?P<entry>[-+]?\d[\d.,]*)",
+    rf"\b(?:ENTRY|ENTER|PRICE|OPEN)\s*[:=]?\s*(?:@\s*)?(?P<entry>{PRICE})"
+    rf"(?:\s*-\s*(?P<entry2>{PRICE}))?",
     re.IGNORECASE,
 )
 
-# TP lines: TP 4287.5 | TP1: 4287.5 | TP1 4287.5 | TAKE PROFIT 4287.5
-# Index must be 1–2 digits glued to TP (TP1) or clearly separated — never eat the price.
 TP_LINE = re.compile(
-    r"\b(?:TP|TAKE\s*PROFIT|TARGET)(?P<idx>\d{1,2})?\b\s*[:=]?\s*"
+    r"\b(?:TP|TAKE\s*PROFIT|TAKEPROFIT|TARGET)(?P<idx>\d{1,2})?\b\s*[:=]?\s*"
     r"(?P<body>.+)",
     re.IGNORECASE,
 )
 
-# SL lines
 SL_LINE = re.compile(
-    r"\b(?:SL|S\.?L\.?|STOP\s*LOSS|STOP)\s*[:=]?\s*(?P<sl>[-+]?\d[\d.,]*)",
+    rf"\b(?:SL|S\.?L\.?|STOP\s*LOSS|STOPLOSS|STOP)\s*[:=]?\s*(?P<sl>{PRICE})",
     re.IGNORECASE,
 )
 
-# Inline multi-TP: TP 4287.5 / 4283 / 4277  or  TP: 1.1 - 1.2 - 1.3
 TP_SPLIT = re.compile(r"[/,|;]|-\s+(?=\d)")
+
+HEADER_NOISE = re.compile(
+    r"(?i)\b(SIGNAL|SETUP|TRADE\s+SETUP|VIP\s+SIGNAL|GOLD\s+SIGNAL)\s*#?\s*\d+\b"
+)
 
 
 class SignalFormatHandler(Protocol):
-    """Protocol for pluggable format handlers."""
-
     name: str
 
     def try_parse(self, text: str) -> ParsedSignal | None: ...
@@ -92,99 +147,207 @@ def _to_direction(raw: str) -> SignalDirection:
     return SignalDirection.SELL
 
 
+def _order_from_kind(
+    direction: SignalDirection,
+    kind: str | None,
+    *,
+    is_range: bool,
+    range_as: str,
+) -> OrderType:
+    k = (kind or "").upper()
+    if k == "LIMIT":
+        return OrderType.BUY_LIMIT if direction == SignalDirection.BUY else OrderType.SELL_LIMIT
+    if k == "STOP":
+        return OrderType.BUY_STOP if direction == SignalDirection.BUY else OrderType.SELL_STOP
+    if is_range:
+        mode = (range_as or "limit").lower()
+        if mode == "market":
+            return (
+                OrderType.MARKET_BUY
+                if direction == SignalDirection.BUY
+                else OrderType.MARKET_SELL
+            )
+        if mode == "entry_zone":
+            return OrderType.ENTRY_ZONE
+        # default: limit
+        return OrderType.BUY_LIMIT if direction == SignalDirection.BUY else OrderType.SELL_LIMIT
+    return OrderType.MARKET_BUY if direction == SignalDirection.BUY else OrderType.MARKET_SELL
+
+
 class DefaultSignalParser:
-    """Primary multi-format signal parser.
+    """Primary multi-format signal parser with range/limit support."""
 
-    Recognizes common VIP-channel layouts including:
-    - SELL XAUUSD 4291.5 / TP lines / SL
-    - SELL XAUUSD @ 4291.5 / TP1: ... / SL:
-    - XAUUSD SELL 4291.5
-    - SELL GOLD / ENTRY 4291.5 / TP a / b / c / SL
-    """
-
-    def __init__(self, extra_handlers: list[ParseHandler] | None = None) -> None:
+    def __init__(
+        self,
+        extra_handlers: list[ParseHandler] | None = None,
+        *,
+        range_as: str = "limit",
+        parser_name: str = "standard",
+        profile_name: str | None = None,
+    ) -> None:
         self._extra_handlers: list[ParseHandler] = list(extra_handlers or [])
+        self.range_as = range_as
+        self.parser_name = parser_name
+        self.profile_name = profile_name
 
     def register_handler(self, handler: ParseHandler) -> None:
-        """Register an additional format handler tried before the default logic."""
         self._extra_handlers.append(handler)
 
     def parse(self, raw_message: str) -> ParsedSignal:
-        """Parse a raw Telegram message into a ParsedSignal.
+        text, norm_notes = prepare_message_for_parse(raw_message or "")
+        ignored = [n for n in norm_notes if n.startswith(("Stripped", "Removed", "Ignored"))]
 
-        Never raises for malformed input — returns a partial ParsedSignal
-        with notes explaining what was / was not found.
-        """
-        text = normalize_whitespace(raw_message or "")
         if not text:
-            return ParsedSignal(raw_message=raw_message or "", parse_notes=["Empty message"])
+            return ParsedSignal(
+                raw_message=raw_message or "",
+                normalized_message="",
+                parse_notes=norm_notes or ["Empty message"],
+                ignored_categories=ignored,
+                parser_name=self.parser_name,
+                provider_profile=self.profile_name,
+            )
 
-        # Cancellation detection (V1: flag only)
         if CANCEL_PATTERN.search(text):
             return ParsedSignal(
-                raw_message=raw_message,
+                raw_message=raw_message or "",
+                normalized_message=text,
                 is_cancellation=True,
-                parse_notes=["CANCELLATION_SIGNAL_DETECTED"],
+                parse_notes=norm_notes + ["CANCELLATION_SIGNAL_DETECTED"],
+                ignored_categories=ignored,
+                parser_name=self.parser_name,
+                provider_profile=self.profile_name,
             )
 
         for handler in self._extra_handlers:
             try:
                 result = handler(text)
                 if result is not None:
-                    result.raw_message = raw_message
+                    result.raw_message = raw_message or ""
+                    result.normalized_message = text
+                    result.parser_name = self.parser_name
+                    result.provider_profile = self.profile_name
                     return result
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Extra parse handler failed: %s", exc)
 
-        return self._parse_default(text, raw_message)
+        return self._parse_default(text, raw_message or "", norm_notes, ignored)
 
-    def _parse_default(self, text: str, raw_message: str) -> ParsedSignal:
-        notes: list[str] = []
+    def _parse_default(
+        self,
+        text: str,
+        raw_message: str,
+        norm_notes: list[str],
+        ignored: list[str],
+    ) -> ParsedSignal:
+        notes = list(norm_notes)
+        if HEADER_NOISE.search(text):
+            notes.append("Ignored signal/setup header numbering")
+            ignored.append("header_numbering")
+
         direction: SignalDirection | None = None
         symbol: str | None = None
         entry: float | None = None
-        take_profits: list[float] = []
-        stop_loss: float | None = None
+        entry_low: float | None = None
+        entry_high: float | None = None
+        entry_type = EntryType.SINGLE
+        order_type: OrderType | None = None
+        kind: str | None = None
 
-        # --- Header: direction + symbol + optional entry ---
-        header_matched = False
-        for pattern in HEADER_PATTERNS:
+        # 1) Explicit LIMIT/STOP ranges
+        for pattern in LIMIT_RANGE_PATTERNS:
             match = pattern.search(text)
-            if match:
+            if not match:
+                continue
+            direction = _to_direction(match.group("direction"))
+            sym = match.groupdict().get("symbol")
+            if sym:
+                symbol = normalize_symbol(sym)
+            kind = match.group("kind")
+            a = parse_float(match.group("a"))
+            b = parse_float(match.group("b"))
+            if a is not None and b is not None:
+                entry_low, entry_high = min(a, b), max(a, b)
+                entry_type = EntryType.RANGE
+                order_type = _order_from_kind(
+                    direction, kind, is_range=True, range_as=self.range_as
+                )
+                notes.append(f"Explicit {kind.upper()} range {entry_low}-{entry_high}")
+            break
+
+        # 2) Implicit ranges (provider profile decides LIMIT vs zone vs market)
+        if entry_low is None:
+            for pattern in IMPLICIT_RANGE_PATTERNS:
+                match = pattern.search(text)
+                if not match:
+                    continue
                 direction = _to_direction(match.group("direction"))
                 symbol = normalize_symbol(match.group("symbol"))
+                a = parse_float(match.group("a"))
+                b = parse_float(match.group("b"))
+                if a is not None and b is not None:
+                    entry_low, entry_high = min(a, b), max(a, b)
+                    entry_type = EntryType.RANGE
+                    order_type = _order_from_kind(
+                        direction, None, is_range=True, range_as=self.range_as
+                    )
+                    notes.append(
+                        f"Implicit entry range {entry_low}-{entry_high} "
+                        f"(range_as={self.range_as} → {order_type.value})"
+                    )
+                break
+
+        # 3) Single-entry headers
+        if entry_low is None and entry is None:
+            for pattern in HEADER_PATTERNS:
+                match = pattern.search(text)
+                if not match:
+                    continue
+                direction = _to_direction(match.group("direction"))
+                symbol = normalize_symbol(match.group("symbol"))
+                kind = match.groupdict().get("kind")
                 entry_raw = match.groupdict().get("entry")
                 if entry_raw:
                     entry = parse_float(entry_raw)
-                header_matched = True
-                notes.append(f"Header matched via {pattern.pattern[:40]}...")
+                order_type = _order_from_kind(
+                    direction, kind, is_range=False, range_as=self.range_as
+                )
+                notes.append("Header matched (single/partial)")
                 break
 
-        if not header_matched:
-            # Fallback: find direction anywhere
+        if direction is None:
             dir_match = DIRECTION_PATTERN.search(text)
             if dir_match:
                 direction = _to_direction(dir_match.group(1))
                 notes.append("Direction found without full header")
 
-        # Explicit ENTRY line overrides / fills entry
+        # ENTRY line (single or range)
         entry_match = ENTRY_LINE.search(text)
         if entry_match:
-            entry = parse_float(entry_match.group("entry"))
-            notes.append("Entry from ENTRY line")
+            e1 = parse_float(entry_match.group("entry"))
+            e2 = parse_float(entry_match.group("entry2")) if entry_match.group("entry2") else None
+            if e1 is not None and e2 is not None:
+                entry_low, entry_high = min(e1, e2), max(e1, e2)
+                entry_type = EntryType.RANGE
+                entry = None
+                if direction and order_type is None:
+                    order_type = _order_from_kind(
+                        direction, None, is_range=True, range_as=self.range_as
+                    )
+                notes.append("Entry range from ENTRY line")
+            elif e1 is not None:
+                entry = e1
+                notes.append("Entry from ENTRY line")
 
-        # --- Take profits ---
         take_profits = self._extract_take_profits(text)
         if take_profits:
             notes.append(f"Found {len(take_profits)} TP(s)")
 
-        # --- Stop loss ---
+        stop_loss: float | None = None
         sl_match = SL_LINE.search(text)
         if sl_match:
             stop_loss = parse_float(sl_match.group("sl"))
             notes.append("Stop loss found")
 
-        # If symbol still missing, try common commodity aliases on their own line
         if symbol is None:
             for alias in ("XAUUSD", "GOLD", "EURUSD", "GBPUSD", "BTCUSD", "NAS100", "US30"):
                 if re.search(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE):
@@ -192,14 +355,27 @@ class DefaultSignalParser:
                     notes.append(f"Symbol inferred as {symbol}")
                     break
 
+        if direction and order_type is None:
+            order_type = _order_from_kind(
+                direction, kind, is_range=entry_type == EntryType.RANGE, range_as=self.range_as
+            )
+
         return ParsedSignal(
             direction=direction,
             symbol=symbol,
             entry=entry,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            entry_type=entry_type,
+            order_type=order_type,
             take_profits=take_profits,
             stop_loss=stop_loss,
             raw_message=raw_message,
+            normalized_message=text,
             parse_notes=notes,
+            ignored_categories=ignored,
+            parser_name=self.parser_name,
+            provider_profile=self.profile_name,
         )
 
     def _extract_take_profits(self, text: str) -> list[float]:
@@ -209,14 +385,11 @@ class DefaultSignalParser:
             if not match:
                 continue
             body = match.group("body")
-            # Split multi-value TP lines
             parts = TP_SPLIT.split(body)
             for part in parts:
                 values = extract_floats(part)
-                # Take first number in each segment (ignore labels like "TP1")
                 if values:
                     tps.append(values[0])
-        # Deduplicate while preserving order
         seen: set[float] = set()
         unique: list[float] = []
         for tp in tps:
@@ -226,7 +399,6 @@ class DefaultSignalParser:
         return unique
 
 
-# Module-level convenience
 _default_parser = DefaultSignalParser()
 
 

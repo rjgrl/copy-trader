@@ -31,7 +31,7 @@ def compute_confidence(
     parts = ConfidenceBreakdown(
         direction_valid=signal.direction is not None,
         symbol_recognized=bool(signal.symbol),
-        entry_valid=signal.entry is not None,
+        entry_valid=signal.has_entry(),
         tp_present=signal.tp_count > 0,
         sl_present=signal.stop_loss is not None,
         relationship_valid=relationship_ok,
@@ -55,33 +55,47 @@ def compute_confidence(
 
 
 def check_price_relationships(signal: ParsedSignal) -> list[str]:
-    """Hard mathematical rules for BUY/SELL vs entry/TP/SL."""
+    """Hard mathematical rules for BUY/SELL vs entry zone / TP / SL."""
     reasons: list[str] = []
-    if signal.direction is None or signal.entry is None:
+    if signal.direction is None or not signal.has_entry():
         return reasons
 
-    entry = signal.entry
+    low = signal.entry_low_bound()
+    high = signal.entry_high_bound()
+    if low is None or high is None:
+        return reasons
+
     direction = signal.direction
 
     if signal.stop_loss is not None:
-        if direction == SignalDirection.BUY and not (signal.stop_loss < entry):
-            reasons.append("BUY requires SL < Entry")
-        if direction == SignalDirection.SELL and not (signal.stop_loss > entry):
-            reasons.append("SELL requires Entry < SL")
+        if direction == SignalDirection.BUY and not (signal.stop_loss < low):
+            reasons.append(
+                f"BUY requires SL below the entry zone (SL {signal.stop_loss} vs zone {low}-{high})"
+            )
+        if direction == SignalDirection.SELL and not (signal.stop_loss > high):
+            reasons.append(
+                f"SELL requires SL above the entry zone (SL {signal.stop_loss} vs zone {low}-{high})"
+            )
 
     for i, tp in enumerate(signal.take_profits, start=1):
-        if direction == SignalDirection.BUY and not (tp > entry):
-            reasons.append(f"BUY requires Entry < TP{i} (got TP{i}={tp})")
-        if direction == SignalDirection.SELL and not (tp < entry):
-            reasons.append(f"SELL requires TP{i} < Entry (got TP{i}={tp})")
+        if direction == SignalDirection.BUY and not (tp > high):
+            reasons.append(
+                f"BUY TP {tp} is not above the entry zone ({low}-{high})."
+            )
+        if direction == SignalDirection.SELL and not (tp < low):
+            reasons.append(
+                f"SELL TP {tp} is above the entry zone."
+                if tp > high
+                else f"SELL TP {tp} is not below the entry zone ({low}-{high})."
+            )
 
     # Full chain when SL and at least one TP exist
     if signal.stop_loss is not None and signal.tp1 is not None:
         if direction == SignalDirection.BUY:
-            if not (signal.stop_loss < entry < signal.tp1):
-                reasons.append("BUY requires SL < Entry < TP1")
+            if not (signal.stop_loss < low and high < signal.tp1):
+                reasons.append("BUY requires SL < entry zone < TP1")
         else:
-            if not (signal.tp1 < entry < signal.stop_loss):
-                reasons.append("SELL requires TP1 < Entry < SL")
+            if not (signal.tp1 < low and high < signal.stop_loss):
+                reasons.append("SELL requires TP1 < entry zone < SL")
 
     return reasons

@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 SPECDIR = Path(SPEC).resolve().parent  # noqa: F821 — injected by PyInstaller
 ROOT = SPECDIR.parent
@@ -84,6 +84,13 @@ hiddenimports = [
     "app.utils.time",
     "MetaTrader5",
     "dotenv",
+    # numpy / MT5 often miss these without explicit collection
+    "numpy",
+    "numpy._core",
+    "numpy._core.multiarray",
+    "numpy._core._multiarray_umath",
+    "numpy.core",
+    "numpy.core.multiarray",
 ]
 
 hiddenimports += collect_submodules("telethon")
@@ -91,16 +98,26 @@ hiddenimports += collect_submodules("pydantic")
 hiddenimports += collect_submodules("pydantic_core")
 hiddenimports += collect_submodules("pydantic_settings")
 
-# Ensure package metadata is available where needed
-datas = []
+datas: list = []
+binaries: list = []
+
+# MetaTrader5 depends on numpy C extensions + DLLs under numpy.libs
+for pkg in ("numpy", "MetaTrader5"):
+    pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
+
 datas += copy_metadata("pydantic")
 datas += copy_metadata("pydantic-settings")
 try:
     datas += copy_metadata("telethon")
 except Exception:
     pass
-
-binaries = []
+try:
+    datas += copy_metadata("numpy")
+except Exception:
+    pass
 
 a = Analysis(  # noqa: F821
     [str(ROOT / "launcher.py")],
@@ -117,7 +134,6 @@ a = Analysis(  # noqa: F821
         "_pytest",
         "tkinter",
         "matplotlib",
-        "numpy.testing",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

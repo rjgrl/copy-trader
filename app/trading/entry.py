@@ -109,9 +109,15 @@ class EntryValidator:
         *,
         spread: float | None = None,
         point: float | None = None,
+        is_new_message: bool = True,
     ) -> EntryDecision:
-        """Evaluate whether a validated signal should be market-executed."""
-        if signal.direction is None or signal.entry is None:
+        """Evaluate whether a validated signal should be market-executed.
+
+        New Telegram messages always market-execute at the current price in the
+        signal direction (BUY/SELL). Distance from the signal entry — including
+        TP1 already being reached — does not reject a new message.
+        """
+        if signal.direction is None or not signal.has_entry():
             return EntryDecision(
                 ok=False,
                 action=EntryAction.REJECT.value,
@@ -138,11 +144,10 @@ class EntryValidator:
                 spread=spread,
             )
 
-        # TP proximity protection
         tp1_reached = False
         if self.entry.tp_proximity_protection and signal.tp1 is not None:
             tp1_reached = is_tp1_reached(direction, signal.tp1, current_price)
-            if tp1_reached:
+            if tp1_reached and not is_new_message:
                 return EntryDecision(
                     ok=False,
                     action=EntryAction.REJECT.value,
@@ -152,19 +157,24 @@ class EntryValidator:
                     spread=spread,
                     tp1_reached=True,
                 )
+            if tp1_reached:
+                reasons.append(
+                    "TP1 already reached; new message — market executing at current price"
+                )
 
         deviation = compute_entry_deviation(direction, entry, current_price)
         max_dev = compute_max_deviation(signal, self.entry)
 
         logger.debug(
-            "Entry check: entry=%s current=%s deviation=%s max=%s",
+            "Entry check: entry=%s current=%s deviation=%s max=%s new=%s",
             entry,
             current_price,
             deviation,
             max_dev,
+            is_new_message,
         )
 
-        if deviation > max_dev:
+        if deviation > max_dev and not is_new_message:
             action = self._too_far_action()
             reasons.append(
                 f"Entry moved too far from signal price "
@@ -174,8 +184,9 @@ class EntryValidator:
                 reasons.append(
                     f"Deviation in points: {price_to_points(deviation, point):.1f}"
                 )
+            ok = action == EntryAction.MARKET
             return EntryDecision(
-                ok=False,
+                ok=ok,
                 action=action.value,
                 reasons=reasons,
                 current_price=current_price,
@@ -186,16 +197,24 @@ class EntryValidator:
                 tp1_reached=tp1_reached,
             )
 
+        if deviation > max_dev:
+            reasons.append(
+                f"Price is {deviation:.5f} from signal entry {entry}; "
+                f"new {direction.value} — market executing at {current_price}"
+            )
+        elif not reasons:
+            reasons.append("Market execute at current price")
+
         return EntryDecision(
             ok=True,
             action=EntryAction.MARKET.value,
-            reasons=["Within entry deviation; TP1 not reached"],
+            reasons=reasons,
             current_price=current_price,
             signal_entry=entry,
             deviation=deviation,
             max_allowed_deviation=max_dev,
             spread=spread,
-            tp1_reached=False,
+            tp1_reached=tp1_reached,
         )
 
     def _too_far_action(self) -> EntryAction:
@@ -204,5 +223,6 @@ class EntryValidator:
             "pending": EntryAction.PENDING,
             "manual": EntryAction.MANUAL,
             "skip": EntryAction.SKIP,
+            "market": EntryAction.MARKET,
         }
-        return mapping.get(self.entry.too_far_behavior, EntryAction.REJECT)
+        return mapping.get(self.entry.too_far_behavior, EntryAction.MARKET)

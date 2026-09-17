@@ -31,7 +31,7 @@ DEFAULT_TP_PROXIMITY_PROTECTION = True
 DEFAULT_USE_SL_BASED_DEVIATION = False
 DEFAULT_MAX_SL_DISTANCE_PERCENT = 15.0
 DEFAULT_ENTRY_DEVIATION_MODE = "fixed"  # fixed | sl_percent | stricter | permissive
-DEFAULT_TOO_FAR_BEHAVIOR = "reject"  # reject | pending | manual
+DEFAULT_TOO_FAR_BEHAVIOR = "market"  # market | reject | pending | manual
 
 # ---------------------------------------------------------------------------
 # Lot sizing

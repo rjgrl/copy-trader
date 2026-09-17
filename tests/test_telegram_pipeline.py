@@ -211,6 +211,29 @@ class TestSourceFiltering:
         assert mgr.is_enabled(-1002) is False
         assert mgr.is_enabled(-9999) is False
 
+    def test_checked_source_persists_and_survives_toggle(self, db: Database) -> None:
+        repo = TelegramSourceRepository(db)
+        repo.set_enabled(-2001, True, name="Gold VIP", source_type="channel")
+        saved = {s.telegram_id: s for s in repo.list_all()}
+        assert saved[-2001].enabled is True
+        assert saved[-2001].name == "Gold VIP"
+        repo.upsert(
+            TelegramSourceRecord(
+                id=None,
+                telegram_id=-2001,
+                name="Gold VIP",
+                source_type="channel",
+                enabled=True,
+                last_message_id=18392,
+            )
+        )
+        repo.set_enabled(-2001, False)
+        again = {s.telegram_id: s for s in repo.list_all()}[-2001]
+        assert again.enabled is False
+        assert again.last_message_id == 18392
+        repo.set_enabled(-2001, True)
+        assert repo.list_enabled()[0].telegram_id == -2001
+
 
 class TestListenerNewMessagesOnly:
     @pytest.mark.asyncio

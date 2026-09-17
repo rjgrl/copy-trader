@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -49,6 +50,7 @@ class AppController(QObject):
         self.inspector = SignalInspector()
         self.worker = AsyncWorker()
         self.worker.error.connect(self.error_occurred.emit)
+        self.worker.started.connect(self._auto_connect_telegram)
         self.worker.start()
 
         self._tg_connected = False
@@ -73,19 +75,28 @@ class AppController(QObject):
             return
         self._shutting_down = True
         self._poll.stop()
-
-        async def _stop():
-            await self.service.stop()
-
-        if self._tg_connected or self.service.listener.is_listening:
-            self.worker.submit(_stop())
-        if self.service.mt5 and self.service.mt5.is_connected:
+        # Wait for Telegram/MT5 disconnect so the EXE process can actually exit
+        try:
+            self.worker.run_and_wait(self.service.stop(), timeout=6.0)
+        except Exception:  # noqa: BLE001
+            logger.warning("Telegram stop during shutdown failed", exc_info=True)
+        if self.service.mt5:
             try:
                 self.service.mt5.disconnect()
             except Exception:  # noqa: BLE001
                 pass
         self.worker.stop()
-        self.db.close()
+        try:
+            self.db.close()
+        except Exception:  # noqa: BLE001
+            pass
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001
+                pass
+            root.removeHandler(handler)
 
     # ------------------------------------------------------------------ status
     def snapshot(self) -> dict[str, Any]:
@@ -100,8 +111,9 @@ class AppController(QObject):
             "account": self._account,
             "mappings": dict(self.settings.symbol_mappings),
             "recent_signals": self.signals.list_recent(20),
-            "recent_orders": self.orders.list_recent(50),
+            "recent_orders": self.orders.list_recent(100),
             "sources": self.sources.list_all(),
+            "enabled_sources": len(self.sources.list_enabled()),
         }
 
     def refresh_status(self) -> None:
@@ -143,7 +155,18 @@ class AppController(QObject):
         self._account = None
         self.refresh_status()
 
-    def connect_telegram(self, *, interactive: bool = True) -> None:
+    def _auto_connect_telegram(self) -> None:
+        """Reconnect Telegram and reload saved groups when a session already exists."""
+        if not self.settings.telegram_api_id or not self.settings.telegram_api_hash:
+            logger.info("Telegram API credentials missing — skip auto-load of groups")
+            return
+        session_file = Path(str(self.settings.telegram_session_path) + ".session")
+        if not session_file.exists():
+            logger.info("No Telegram session file — skip auto-load of groups")
+            return
+        self.connect_telegram(interactive=False, load_dialogs=True)
+
+    def connect_telegram(self, *, interactive: bool = True, load_dialogs: bool = True) -> None:
         async def _connect():
             await self.service.connect(interactive_auth=False)
             if self.service.client_service.is_authorized:
@@ -160,12 +183,34 @@ class AppController(QObject):
 
         def _done(ok: bool) -> None:
             self._tg_connected = bool(ok)
-            self.auth_finished.emit(bool(ok), "authorized" if ok else "not authorized")
+            if interactive or ok:
+                self.auth_finished.emit(bool(ok), "authorized" if ok else "not authorized")
+            elif not ok:
+                logger.info("Telegram session not authorized — skipping auto-load of groups")
             self.refresh_status()
+            if ok and load_dialogs:
+                self.load_dialogs()
 
         self.worker.submit(_connect(), on_done=_done)
 
-    def start_listening(self) -> None:
+    def start_listening(self, selections: list[dict] | None = None) -> None:
+        if selections is not None:
+            self.save_source_selections(selections)
+        enabled = self.sources.list_enabled()
+        if not enabled:
+            self.error_occurred.emit(
+                "No Telegram groups are enabled. "
+                "Open the Telegram page, check at least one group, then Start Listening."
+            )
+            return
+
+        enabled_names = ", ".join(s.name for s in enabled)
+        logger.info(
+            "Start Listening: %s saved group(s): %s",
+            len(enabled),
+            enabled_names,
+        )
+
         async def _listen():
             if not self.service.client_service.is_connected:
                 await self.service.connect(interactive_auth=False)
@@ -175,15 +220,83 @@ class AppController(QObject):
                     self._mt5_connected = True
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Listen without MT5: %s", exc)
+            still_enabled = self.sources.list_enabled()
+            if not still_enabled:
+                raise RuntimeError(
+                    "No Telegram groups are enabled. "
+                    "Open the Telegram page, check at least one group, then Start Listening."
+                )
             await self.service.start_listening()
-            return True
+            return len(still_enabled)
 
-        def _done(_result) -> None:
+        def _done(count) -> None:
             self._tg_connected = True
             self._listening = True
             self.refresh_status()
+            logger.info("Listener running for %s group(s)", count)
 
         self.worker.submit(_listen(), on_done=_done)
+
+    def save_source_selections(self, selections: list[dict]) -> int:
+        """Persist the Telegram page checkbox state in one pass."""
+        for item in selections:
+            tid = int(item.get("telegram_id") or 0)
+            if not tid:
+                continue
+            self._write_source(
+                tid,
+                str(item.get("name") or f"chat:{tid}"),
+                str(item.get("type") or "unknown"),
+                bool(item.get("enabled")),
+            )
+        enabled = self.sources.list_enabled()
+        logger.info(
+            "Saved Telegram selections: %s row(s), %s enabled",
+            len(selections),
+            len(enabled),
+        )
+        return len(enabled)
+
+    def set_source_enabled(self, telegram_id: int, enabled: bool) -> None:
+        self.sources.set_enabled(telegram_id, enabled)
+        logger.info("Saved Telegram source %s enabled=%s", telegram_id, enabled)
+
+    def upsert_source(self, telegram_id: int, name: str, source_type: str, enabled: bool) -> None:
+        self._write_source(telegram_id, name, source_type, enabled)
+        logger.info("Saved Telegram source %s (%s) enabled=%s", name, telegram_id, enabled)
+
+    def _write_source(self, telegram_id: int, name: str, source_type: str, enabled: bool) -> None:
+        from app.database.models import TelegramSourceRecord
+
+        existing = next((s for s in self.sources.list_all() if s.telegram_id == telegram_id), None)
+        if existing is None:
+            self.sources.upsert(
+                TelegramSourceRecord(
+                    id=None,
+                    telegram_id=telegram_id,
+                    name=name,
+                    source_type=source_type,
+                    enabled=enabled,
+                    connection_status="configured",
+                )
+            )
+            return
+        existing.name = name or existing.name
+        existing.source_type = source_type or existing.source_type
+        existing.enabled = enabled
+        self.sources.upsert(existing)
+
+    def delete_selected_dry_run_orders(self, order_ids: list[int]) -> int:
+        deleted = self.orders.delete_by_ids(order_ids)
+        logger.info("Deleted %s selected dry-run order(s)", deleted)
+        self.refresh_status()
+        return deleted
+
+    def delete_all_dry_run_orders(self) -> int:
+        deleted = self.orders.delete_dry_run()
+        logger.info("Deleted %s dry-run order(s)", deleted)
+        self.refresh_status()
+        return deleted
 
     def stop_listening(self) -> None:
         self.service.listener.stop()
@@ -200,24 +313,6 @@ class AppController(QObject):
         self.settings.kill_switch_active = False
         self.refresh_status()
 
-    def set_source_enabled(self, telegram_id: int, enabled: bool) -> None:
-        self.sources.set_enabled(telegram_id, enabled)
-        self.refresh_status()
-
-    def upsert_source(self, telegram_id: int, name: str, source_type: str, enabled: bool) -> None:
-        from app.database.models import TelegramSourceRecord
-
-        self.sources.upsert(
-            TelegramSourceRecord(
-                id=None,
-                telegram_id=telegram_id,
-                name=name,
-                source_type=source_type,
-                enabled=enabled,
-            )
-        )
-        self.refresh_status()
-
     def load_dialogs(self) -> None:
         async def _fetch():
             if not self.service.client_service.is_connected:
@@ -231,6 +326,7 @@ class AppController(QObject):
                     "name": d.name,
                     "type": d.dialog_type.value,
                     "monitored": d.is_monitored,
+                    "last_message_id": d.last_message_id,
                 }
                 for d in dialogs
             ]

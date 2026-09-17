@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class TpOrderOutcome:
     tp_index: int
-    take_profit: float
+    take_profit: float | None
     volume: float
     result: OrderResult
     order_db_id: int | None = None
@@ -56,6 +56,18 @@ class ExecutionResult:
     @property
     def reason(self) -> str:
         return "; ".join(self.reasons) if self.reasons else self.status.value
+
+
+def sl_valid_for_price(direction: str, sl: float, price: float) -> bool:
+    if direction == "BUY":
+        return sl < price
+    return sl > price
+
+
+def tp_valid_for_price(direction: str, tp: float, price: float) -> bool:
+    if direction == "BUY":
+        return tp > price
+    return tp < price
 
 
 class SignalTradeExecutor:
@@ -109,9 +121,46 @@ class SignalTradeExecutor:
             volume_max=spec.volume_max,
             volume_step=spec.volume_step,
         )
+        direction = signal.direction.value if signal.direction else "SELL"
+        exec_price = entry.decision.current_price or entry.snapshot.execution_price
+        usable_sl = (
+            signal.stop_loss
+            if signal.stop_loss is not None
+            and sl_valid_for_price(direction, signal.stop_loss, exec_price)
+            else None
+        )
+        usable_tps: list[float | None] = [
+            tp
+            for tp in signal.take_profits
+            if tp_valid_for_price(direction, tp, exec_price)
+        ]
+        if not usable_tps:
+            # Price already passed every TP — still place one BUY/SELL at market.
+            usable_tps = [None]
+            logger.warning(
+                "All signal TPs are on the wrong side of current price %s; "
+                "placing one %s market order without TP",
+                exec_price,
+                direction,
+            )
+        if usable_sl is None and signal.stop_loss is not None:
+            logger.warning(
+                "Signal SL %s is on the wrong side of current price %s — omitting SL",
+                signal.stop_loss,
+                exec_price,
+            )
+
+        # Slippage allowance in points (price deviation / point)
+        deviation_points = max(
+            50,
+            int(round((self.settings.entry.max_entry_deviation / spec.point)))
+            if spec.point > 0
+            else 50,
+        )
+
         try:
             lots = calculate_lots_per_tp(
-                signal.tp_count,
+                len(usable_tps),
                 self.settings.risk,
                 constraints,
             )
@@ -121,19 +170,9 @@ class SignalTradeExecutor:
                 reasons=[str(exc)],
             )
 
-        direction = signal.direction.value if signal.direction else "SELL"
-        exec_price = entry.decision.current_price or entry.snapshot.execution_price
-        # Slippage allowance in points (price deviation / point)
-        deviation_points = max(
-            10,
-            int(round((self.settings.entry.max_entry_deviation / spec.point)))
-            if spec.point > 0
-            else 50,
-        )
-
         outcomes: list[TpOrderOutcome] = []
         for i, (tp, volume) in enumerate(
-            zip(signal.take_profits, lots, strict=True), start=1
+            zip(usable_tps, lots, strict=True), start=1
         ):
             # Prefer telegram symbol for comment readability; fall back to mapped
             comment_symbol = (signal.symbol or entry.mapped_symbol).replace("#", "")
@@ -146,7 +185,7 @@ class SignalTradeExecutor:
                 volume,
                 exec_price,
                 tp,
-                signal.stop_loss,
+                usable_sl,
             )
             result = self.executor.send_market_order(
                 OrderRequest(
@@ -154,7 +193,7 @@ class SignalTradeExecutor:
                     direction=direction,
                     volume=volume,
                     price=float(exec_price),
-                    stop_loss=signal.stop_loss,
+                    stop_loss=usable_sl,
                     take_profit=tp,
                     magic=self.settings.magic_number,
                     comment=comment,
@@ -172,7 +211,7 @@ class SignalTradeExecutor:
                     direction=direction,
                     volume=volume,
                     entry_price=result.price,
-                    stop_loss=signal.stop_loss,
+                    stop_loss=usable_sl,
                     take_profit=tp,
                     tp_index=i,
                     status=result.status_label,

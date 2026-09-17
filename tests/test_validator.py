@@ -57,7 +57,7 @@ def test_sl_wrong_side_buy() -> None:
     )
     result = SignalValidator().validate(signal)
     assert result.ok is False
-    assert "SL < Entry" in result.reason
+    assert "SL below the entry zone" in result.reason
 
 
 def test_sl_wrong_side_sell() -> None:
@@ -70,7 +70,7 @@ def test_sl_wrong_side_sell() -> None:
     )
     result = SignalValidator().validate(signal)
     assert result.ok is False
-    assert "Entry < SL" in result.reason
+    assert "SL above the entry zone" in result.reason
 
 
 def test_cancellation_skipped() -> None:

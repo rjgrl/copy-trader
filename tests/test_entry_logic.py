@@ -47,18 +47,44 @@ class TestSellEntry:
         assert decision.deviation == pytest.approx(1.7)
         assert decision.tp1_reached is False
 
-    def test_too_far_rejected(self) -> None:
-        """SELL entry 4291.5, current 4298.0, max 3.0 → REJECTED."""
+    def test_too_far_new_message_still_markets(self) -> None:
+        """SELL entry 4291.5, current 4298.0 — new message still MARKET."""
         validator = EntryValidator(EntrySettings(max_entry_deviation=3.0))
         decision = validator.evaluate(_sell_signal(), current_price=4298.0)
+        assert decision.ok is True
+        assert decision.action == "market"
+        assert decision.deviation == pytest.approx(6.5)
+
+    def test_too_far_rejected_when_not_new_message(self) -> None:
+        """Non-new messages still respect max deviation when configured to reject."""
+        validator = EntryValidator(
+            EntrySettings(max_entry_deviation=3.0, too_far_behavior="reject")
+        )
+        decision = validator.evaluate(
+            _sell_signal(),
+            current_price=4298.0,
+            is_new_message=False,
+        )
         assert decision.ok is False
         assert decision.action == "reject"
         assert decision.deviation == pytest.approx(6.5)
 
-    def test_tp1_already_reached(self) -> None:
-        """SELL TP1 4287.5, current 4285.8 → REJECTED (TP1 reached)."""
+    def test_tp1_already_reached_new_message_still_markets(self) -> None:
+        """SELL TP1 already hit — new message still MARKET at current price."""
         validator = EntryValidator(EntrySettings(max_entry_deviation=3.0))
         decision = validator.evaluate(_sell_signal(), current_price=4285.8)
+        assert decision.ok is True
+        assert decision.action == "market"
+        assert decision.tp1_reached is True
+
+    def test_tp1_already_reached_rejected_when_not_new_message(self) -> None:
+        """Non-new messages still reject when TP1 is already reached."""
+        validator = EntryValidator(EntrySettings(max_entry_deviation=3.0))
+        decision = validator.evaluate(
+            _sell_signal(),
+            current_price=4285.8,
+            is_new_message=False,
+        )
         assert decision.ok is False
         assert decision.tp1_reached is True
         assert "TP1 already reached" in decision.reason
@@ -76,14 +102,15 @@ class TestBuyEntry:
         assert decision.action == "market"
         assert decision.deviation == pytest.approx(1.7)
 
-    def test_tp1_already_reached(self) -> None:
-        """BUY TP1 4295.5, current 4297.0 → REJECTED."""
+    def test_tp1_already_reached_new_message_still_markets(self) -> None:
+        """BUY TP1 already hit — new message still MARKET."""
         validator = EntryValidator(EntrySettings(max_entry_deviation=10.0))
         decision = validator.evaluate(
             _buy_signal(entry=4291.5, tp1=4295.5),
             current_price=4297.0,
         )
-        assert decision.ok is False
+        assert decision.ok is True
+        assert decision.action == "market"
         assert decision.tp1_reached is True
 
 
@@ -132,7 +159,12 @@ class TestSpreadAndSlDeviation:
             max_entry_deviation=1.0,
             entry_deviation_mode="stricter",
             max_sl_distance_percent=15.0,
+            too_far_behavior="reject",
         )
         validator = EntryValidator(settings)
-        decision = validator.evaluate(_sell_signal(), current_price=4293.2)
+        decision = validator.evaluate(
+            _sell_signal(),
+            current_price=4293.2,
+            is_new_message=False,
+        )
         assert decision.ok is False

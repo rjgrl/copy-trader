@@ -71,25 +71,30 @@ SL 4306.5"""
         assert result.ok is True
         assert result.mapped_symbol == "GOLD#"
 
-    def test_too_far_rejected(self, settings: AppSettings, mock_gw: MockMT5Gateway) -> None:
+    def test_too_far_new_message_still_markets(
+        self, settings: AppSettings, mock_gw: MockMT5Gateway
+    ) -> None:
         mock_gw.set_tick("GOLD#", bid=4298.0, ask=4298.3)
         mt5 = MT5Service(settings, gateway=mock_gw)
         mt5.connect()
         engine = IntelligentEntryEngine(settings, mt5)
         result = engine.evaluate(parse_signal(SAMPLE_SELL_XAUUSD))
-        assert result.ok is False
-        assert result.status == SignalStatus.REJECTED
+        assert result.ok is True
+        assert result.status == SignalStatus.ENTRY_CHECKED
+        assert result.decision.action == "market"
         assert result.decision.deviation == pytest.approx(6.5)
 
-    def test_tp1_reached(self, settings: AppSettings, mock_gw: MockMT5Gateway) -> None:
+    def test_tp1_reached_new_message_still_markets(
+        self, settings: AppSettings, mock_gw: MockMT5Gateway
+    ) -> None:
         mock_gw.set_tick("GOLD#", bid=4285.8, ask=4286.1)
         mt5 = MT5Service(settings, gateway=mock_gw)
         mt5.connect()
         engine = IntelligentEntryEngine(settings, mt5)
         result = engine.evaluate(parse_signal(SAMPLE_SELL_XAUUSD))
-        assert result.ok is False
+        assert result.ok is True
+        assert result.decision.action == "market"
         assert result.decision.tp1_reached is True
-        assert "TP1 already reached" in result.reason
 
     def test_spread_too_high(self, settings: AppSettings, mock_gw: MockMT5Gateway) -> None:
         settings.risk.max_spread = 0.1
